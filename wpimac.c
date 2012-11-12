@@ -255,6 +255,7 @@ static void
 init(void)
 {
   on();
+  printf("I am WPI-MAC and my node ID is: %u\n", node_id);
 }
 /*---------------------------------------------------------------------------*/
 const struct rdc_driver wpimac_driver = {
