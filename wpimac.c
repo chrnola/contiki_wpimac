@@ -13,6 +13,7 @@
  */
 
 #include "sys/rtimer.h"
+#include "sys/clock.h"
 #include "net/mac/wpimac.h"
 #include "net/packetbuf.h"
 #include "net/queuebuf.h"
@@ -20,12 +21,16 @@
 #include <string.h>
 
 #ifndef TOTAL_SLOTS
-#define TOTAL_SLOTS        12
-#endif
+ #define TOTAL_SLOTS        12
+ #endif
 
 #ifndef CRANKSHAFT_PERIOD
-#define CRANKSHAFT_PERIOD 1008
-#endif
+ #define CRANKSHAFT_PERIOD 1008
+ #endif
+
+#ifndef BROADCAST_SLOT
+ #define BROADCAST_SLOT 0
+ #endif
 
 static volatile unsigned char waiting_for_sync = 0;
 static volatile unsigned char synced = 0;
@@ -34,13 +39,18 @@ static volatile unsigned char radio_is_on = 0;
 static volatile unsigned char current_slot = 0;
 static volatile unsigned char crankshaft_is_running = 0;
 
+static struct pt syncPT;
+
 //static volatile unsigned char waiting_for_packet = 0;
 //static volatile unsigned char someone_is_sending = 0;
 //static volatile unsigned char we_are_sending = 0;
 
-// static void sendSyncMessage(void);
+static void sendSyncMessage(void);
 static void startCrankshaft(void);
 static void advanceSlot(struct rtimer *t, void *ptr, int status);
+static void schedule_outgoing_packet(unsigned char, mac_callback_t, void *, void *, uint16_t);
+static void real_send(mac_callback_t, void *, void *, uint16_t);
+static void checkForSyncPacket(void);
 
 static struct rtimer taskSlot;
 
@@ -74,20 +84,42 @@ static void send_packet(mac_callback_t sent, void *ptr)
   if(rimeaddr_cmp(packetbuf_addr(PACKETBUF_ADDR_RECEIVER), &rimeaddr_null)){
     printf("WPI-MAC-send_packet(), node ID: %u, GOT BROADCAST?\n", node_id);
     // schedule for slot 0
+    schedule_outgoing_packet(BROADCAST_SLOT, sent, ptr, packetbuf_hdrptr(), packetbuf_totlen());
   } else {
     unsigned char dest_node = dest->u8[7];
     printf("WPI-MAC-send_packet(), node ID: %u - GOT UNICAST? to %d\n", node_id, dest->u8[7]);
     // schedule for slot dest_node
-    schedule_outgoing_packet(sent, ptr)
+    schedule_outgoing_packet(dest_node, sent, ptr, packetbuf_hdrptr(), packetbuf_totlen());
   }
   
-}
-/*---------------------------------------------------------------------------*/
-static void schedule_outgoing_packet(){
 
+  // orig send
+  // if(NETSTACK_FRAMER.create() < 0) {
+  //   /* Failed to allocate space for headers */
+  //   printf("nullrdc: send failed, too large header\n");
+  //   ret = MAC_TX_ERR_FATAL;
+  // } else {
+  //   switch(NETSTACK_RADIO.send(packetbuf_hdrptr(), packetbuf_totlen())) {
+  //   case RADIO_TX_OK:
+  //     ret = MAC_TX_OK;
+  //     break;
+  //   case RADIO_TX_COLLISION:
+  //     ret = MAC_TX_COLLISION;
+  //     break;
+  //   case RADIO_TX_NOACK:
+  //     ret = MAC_TX_NOACK;
+  //     break;
+  //   default:
+  //     ret = MAC_TX_ERR;
+  //     break;
+  //   }
 }
 /*---------------------------------------------------------------------------*/
-static void real_send(mac_callback_t sent, void *ptr, void *packetheader, ){
+static void schedule_outgoing_packet(unsigned char slot, mac_callback_t sent, void *ptr, void *packetheader, uint16_t totlen){
+  real_send(sent, ptr, packetheader, totlen);
+}
+/*---------------------------------------------------------------------------*/
+static void real_send(mac_callback_t sent, void *ptr, void *packetheader, uint16_t totlen){
   int ret;
   packetbuf_set_addr(PACKETBUF_ADDR_SENDER, &rimeaddr_node_addr);
   if(NETSTACK_FRAMER.create() < 0) {
@@ -95,7 +127,7 @@ static void real_send(mac_callback_t sent, void *ptr, void *packetheader, ){
     printf("nullrdc: send failed, too large header\n");
     ret = MAC_TX_ERR_FATAL;
   } else {
-    switch(NETSTACK_RADIO.send(packetbuf_hdrptr(), packetbuf_totlen())) {
+    switch(NETSTACK_RADIO.send(packetheader, totlen)) {
     case RADIO_TX_OK:
       ret = MAC_TX_OK;
       break;
@@ -162,11 +194,21 @@ static void init(void){
     sendSyncMessage();
   } else{
     waiting_for_sync = 1;
+    printf("Waiting until we get the sync packet.\n");
+    while(waiting_for_sync){
+      checkForSyncPacket();
+    }
+    printf("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! DONE WAITING!!!!!!\n");
   }
 }
 /*---------------------------------------------------------------------------*/
 static void sendSyncMessage(){
-  
+  clock_wait((CLOCK_SECOND / 60) * 75);
+  printf("I must be node 1, sending sync message!\n");
+}
+/*---------------------------------------------------------------------------*/
+static void checkForSyncPacket(){
+
 }
 /*---------------------------------------------------------------------------*/
 const struct rdc_driver wpimac_driver = {
