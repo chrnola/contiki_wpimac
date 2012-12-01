@@ -32,45 +32,29 @@
  #define BROADCAST_SLOT 0
  #endif
 
-static volatile unsigned char waiting_for_sync = 0;
-static volatile unsigned char synced = 0;
-static volatile unsigned char radio_is_on = 0;
+#ifndef TURN_OFF
+ #define TURN_OFF 0
+ #endif
 
+static volatile unsigned char radio_is_on = 0;
 static volatile unsigned char current_slot = 0;
 static volatile unsigned char crankshaft_is_running = 0;
-
-static struct pt syncPT;
 
 //static volatile unsigned char waiting_for_packet = 0;
 //static volatile unsigned char someone_is_sending = 0;
 //static volatile unsigned char we_are_sending = 0;
 
-static void sendSyncMessage(void);
-static void startCrankshaft(void);
+static unsigned int REGULAR_SLOT = (RTIMER_SECOND / 1000) * (CRANKSHAFT_PERIOD / TOTAL_SLOTS);
 static void advanceSlot(struct rtimer *t, void *ptr, int status);
 static void schedule_outgoing_packet(unsigned char, mac_callback_t, void *, void *, uint16_t);
 static void real_send(mac_callback_t, void *, void *, uint16_t);
-static void checkForSyncPacket(void);
+static char check_buffers(unsigned char);
 
 static struct rtimer taskSlot;
 
 /*---------------------------------------------------------------------------*/
-static void startCrankshaft(){
-  if(synced){
-    current_slot = 0;
-    //must schedule recurring wakeups for broadcast and uni-recv
-    //also schedule slot advance
-    rtimer_set(&taskSlot, RTIMER_NOW() + ((RTIMER_SECOND / 1000) * (CRANKSHAFT_PERIOD / TOTAL_SLOTS)), 1, (void (*)(struct rtimer *, void *))advanceSlot, NULL);
-  }
-}
-/*---------------------------------------------------------------------------*/
-static void advanceSlot(struct rtimer *t, void *ptr, int status){
-  rtimer_set(t, RTIMER_TIME(t) + ((RTIMER_SECOND / 1000) * (CRANKSHAFT_PERIOD / TOTAL_SLOTS)), 1, (void (*)(struct rtimer *, void *))advanceSlot, NULL);
-  current_slot++;
-  if(current_slot > (TOTAL_SLOTS - 1)){
-    current_slot = 0;
-  }
-  printf("Slot is now %u\n", current_slot);
+static char check_buffers(unsigned char for_slot){
+  return 0;
 }
 /*---------------------------------------------------------------------------*/
 static void send_packet(mac_callback_t sent, void *ptr)
@@ -167,14 +151,14 @@ static void packet_input(void)
 /*---------------------------------------------------------------------------*/
 static int on(void)
 {
-  printf("WPI-MAC-on(), node ID: %u\n", node_id);
+  //printf("WPI-MAC-on(), node ID: %u\n", node_id);
   radio_is_on = 1;
   return NETSTACK_RADIO.on();
 }
 /*---------------------------------------------------------------------------*/
 static int off(int keep_radio_on)
 {
-  printf("WPI-MAC-off(), node ID: %u\n", node_id);
+  //printf("WPI-MAC-off(), node ID: %u\n", node_id);
   if(keep_radio_on) {
     return NETSTACK_RADIO.on();
   } else {
@@ -187,28 +171,45 @@ static unsigned short channel_check_interval(void){
   return 0;
 }
 /*---------------------------------------------------------------------------*/
+static void advanceSlot(struct rtimer *t, void *ptr, int status){
+  rtimer_set(t, RTIMER_TIME(t) + REGULAR_SLOT, 5, (void (*)(struct rtimer *, void *))advanceSlot, NULL);
+  if(current_slot == TOTAL_SLOTS + 1){
+    current_slot = BROADCAST_SLOT;
+  } else{
+    current_slot++;
+  }
+  if(current_slot > (TOTAL_SLOTS - 1)){
+    current_slot = BROADCAST_SLOT;
+  }
+  //printf("Slot is now %u\n", current_slot);
+  if(current_slot == BROADCAST_SLOT || current_slot == node_id || check_buffers(current_slot)){
+    // we need to be on
+    if(!radio_is_on) on();
+  } else{
+    // we can snooze
+    if(radio_is_on) off(TURN_OFF);
+  }
+
+}
+/*---------------------------------------------------------------------------*/
 static void init(void){
   on();
+  current_slot = TOTAL_SLOTS + 1;
+  crankshaft_is_running = 1;
+  //must schedule recurring wakeups for broadcast and uni-recv
+  //also schedule slot advance
+  rtimer_set(&taskSlot, RTIMER_NOW() + REGULAR_SLOT, 5, (void (*)(struct rtimer *, void *))advanceSlot, NULL);
 
-  if(node_id == 1){
-    sendSyncMessage();
-  } else{
-    waiting_for_sync = 1;
-    printf("Waiting until we get the sync packet.\n");
-    while(waiting_for_sync){
-      checkForSyncPacket();
-    }
-    printf("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! DONE WAITING!!!!!!\n");
-  }
-}
-/*---------------------------------------------------------------------------*/
-static void sendSyncMessage(){
-  clock_wait((CLOCK_SECOND / 60) * 75);
-  printf("I must be node 1, sending sync message!\n");
-}
-/*---------------------------------------------------------------------------*/
-static void checkForSyncPacket(){
-
+  // if(node_id == 1){
+  //   sendSyncMessage();
+  // } else{
+  //   waiting_for_sync = 1;
+  //   // printf("Waiting until we get the sync packet.\n");
+  //   // while(waiting_for_sync){
+  //   //   checkForSyncPacket();
+  //   // }
+  //   // printf("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! DONE WAITING!!!!!!\n");
+  // }
 }
 /*---------------------------------------------------------------------------*/
 const struct rdc_driver wpimac_driver = {
