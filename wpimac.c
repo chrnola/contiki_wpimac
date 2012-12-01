@@ -40,10 +40,6 @@ static volatile unsigned char radio_is_on = 0;
 static volatile unsigned char current_slot = 0;
 static volatile unsigned char crankshaft_is_running = 0;
 
-//static volatile unsigned char waiting_for_packet = 0;
-//static volatile unsigned char someone_is_sending = 0;
-//static volatile unsigned char we_are_sending = 0;
-
 static unsigned int REGULAR_SLOT = (RTIMER_SECOND / 1000) * (CRANKSHAFT_PERIOD / TOTAL_SLOTS);
 static void advanceSlot(struct rtimer *t, void *ptr, int status);
 static void schedule_outgoing_packet(unsigned char, mac_callback_t, void *, void *, uint16_t);
