@@ -37,6 +37,26 @@
  #define TURN_OFF 0
  #endif
 
+#ifndef CONTENTION_SLOTS
+ #define CONTENTION_SLOTS 4
+ #endif
+
+#ifndef CONTENTION_TICKS
+ #define CONTENTION_TICKS 5
+ #endif
+
+#ifndef MAX_STROBE_SIZE
+ #define MAX_STROBE_SIZE 1000
+ #endif
+
+#ifndef CCA_TICKS
+ #define CCA_TICKS 4
+ #endif
+
+#ifndef CCA_TICKS
+ #define CCA_TICKS 42
+ #endif
+
 static volatile unsigned char radio_is_on = 0;
 static volatile unsigned char current_slot = 0;
 static volatile unsigned char waiting_to_send = 0;
@@ -147,14 +167,18 @@ static void advanceSlot(struct rtimer *t, void *ptr, int status){
   unsigned char somethingToSend = check_buffers(current_slot);
   if(current_slot == BROADCAST_SLOT || current_slot == node_id || somethingToSend){
     // we need to be on
-    if(!radio_is_on) on();
 
     // see if we gotta send
     if((current_slot != node_id) && somethingToSend){
-    //   // grab the necessary info from our queue
+    // grab the necessary info from our queue
       QueuedPacket *curr = QPQueue[current_slot];
+      if(!radio_is_on) on();
       real_send(curr->sent, curr->ptr, curr->packet);
-    } // else we just need to be awake to listen
+    } else { // else we just need to be awake to listen
+      // WAIT FOR CONTENTION
+      // while(RTIMER_CLOCK_LT(RTIMER_NOW(), RTIMER_TIME(t) + CONTENTION_TICKS));
+      if(!radio_is_on) on();
+    } 
 
   } else{
     // we can snooze
@@ -199,49 +223,94 @@ const struct rdc_driver wpimac_driver = {
 /*---------------------------------------------------------------------------*/
 static void real_send(mac_callback_t sent, void *ptr, struct queuebuf *pkt){
     int ret;
+    uint8_t contention_strobe[MAX_STROBE_SIZE];
+    unsigned char won_contention = 0;
 
-    queuebuf_to_packetbuf(pkt);
-
-    packetbuf_set_addr(PACKETBUF_ADDR_SENDER, &rimeaddr_node_addr);
-    if(NETSTACK_FRAMER.create() < 0) {
-      /* Failed to allocate space for headers */
-      printf("wpimac: send failed, too large header\n");
-      ret = MAC_TX_ERR_FATAL;
+    int len = NETSTACK_FRAMER.create();
+    if(len < 0) {
+      // off(TURN_OFF);
+      /* Failed to send */
+      printf("WPI-MAC: send failed, too large header\n");
+      mac_call_sent_callback(sent, ptr, MAC_TX_ERR_FATAL, 1);
     } else {
-      // printf("%s - %u - %u\n", "Waiting to send...", current_slot, needed_slot);
-      // while(radio_is_on == 0 && !(current_slot == needed_slot)); //wish i knew why this didn't work
-      // rtimer_clock_t recent = RTIMER_TIME(&taskSlot);
-      // rtimer_clock_t until = calcNext(current_slot, needed_slot);
-      // while(RTIMER_CLOCK_LT(RTIMER_NOW(), recent + until));
-      // printf("%s - %u - %u\n", "sending!", current_slot, needed_slot);
-      switch(NETSTACK_RADIO.send(packetbuf_hdrptr(), packetbuf_totlen())) {
-      case RADIO_TX_OK:
-        ret = MAC_TX_OK;
-        break;
-      case RADIO_TX_COLLISION:
-        ret = MAC_TX_COLLISION;
-        break;
-      case RADIO_TX_NOACK:
-        ret = MAC_TX_NOACK;
-        break;
-      default:
-        ret = MAC_TX_ERR;
-        break;
+      // randomly pick slot
+      // make filler packet
+      // wait for our random slot
+      if(NETSTACK_RADIO.channel_clear()){
+        // send filler, if no err, we won contention
+        won_contention = 1;
+      } else {
+        won_contention = 0;
       }
 
-    }
+      if(won_contention){
+        memcpy(contention_strobe, packetbuf_hdrptr(), len);
+        int j;
+        for(j = 0; j < 45; j++){
+          contention_strobe[len] = 7;
+          len++;
+        }
 
-    mac_call_sent_callback(sent, ptr, ret, 1);
+        rtimer_clock_t t0 = RTIMER_NOW();
+        NETSTACK_RADIO.channel_clear();
+        rtimer_clock_t t1 = RTIMER_NOW();
+        NETSTACK_RADIO.send(contention_strobe, len);
+        rtimer_clock_t t2 = RTIMER_NOW();
+        printf("TIMES %u - %u - %u - %u\n", t0, t1, t2, len);
 
-    // remove packet from our queue
-    if(ret == MAC_TX_OK){
-      QueuedPacket *head = QPQueue[current_slot];
-      QPQueue[current_slot] = head->next;
-      head->ptr = NULL;
-      free(head->packet);
-      head->packet = NULL;
-      head->next = NULL;
-      free(head);
+
+        // if(NETSTACK_RADIO.clear_channel()){
+
+        // }
+
+        queuebuf_to_packetbuf(pkt);
+        packetbuf_set_addr(PACKETBUF_ADDR_SENDER, &rimeaddr_node_addr);
+        if(NETSTACK_FRAMER.create() < 0) {
+          /* Failed to allocate space for headers */
+          printf("wpimac: send failed, too large header\n");
+          ret = MAC_TX_ERR_FATAL;
+        } else {
+          // printf("%s - %u - %u\n", "Waiting to send...", current_slot, needed_slot);
+          // while(radio_is_on == 0 && !(current_slot == needed_slot)); //wish i knew why this didn't work
+          // rtimer_clock_t recent = RTIMER_TIME(&taskSlot);
+          // rtimer_clock_t until = calcNext(current_slot, needed_slot);
+          // while(RTIMER_CLOCK_LT(RTIMER_NOW(), recent + until));
+          // printf("%s - %u - %u\n", "sending!", current_slot, needed_slot);
+          printf("%u\n", packetbuf_totlen());
+          switch(NETSTACK_RADIO.send(packetbuf_hdrptr(), packetbuf_totlen())) {
+          case RADIO_TX_OK:
+            ret = MAC_TX_OK;
+            break;
+          case RADIO_TX_COLLISION:
+            ret = MAC_TX_COLLISION;
+            break;
+          case RADIO_TX_NOACK:
+            ret = MAC_TX_NOACK;
+            break;
+          default:
+            ret = MAC_TX_ERR;
+            break;
+          }
+
+        }
+
+        // off(TURN_OFF);
+        mac_call_sent_callback(sent, ptr, ret, 1);
+
+        // remove packet from our queue
+        if(ret == MAC_TX_OK){
+          QueuedPacket *head = QPQueue[current_slot];
+          QPQueue[current_slot] = head->next;
+          head->ptr = NULL;
+          queuebuf_free(head->packet);
+          head->packet = NULL;
+          head->next = NULL;
+          free(head);
+        }
+      } else { // lost contention
+        mac_call_sent_callback(sent, ptr, MAC_TX_COLLISION, 1);
+      }
+      
     }
 }
 /*---------------------------------------------------------------------------*/
