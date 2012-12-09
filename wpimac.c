@@ -234,6 +234,9 @@ static void real_send(mac_callback_t sent, void *ptr, struct queuebuf *pkt){
       mac_call_sent_callback(sent, ptr, MAC_TX_ERR_FATAL, 1);
     } else {
       // randomly pick slot
+      srand(RTIMER_NOW() * node_id);
+      int rand_slot = (rand()/RAND_MAX) * CONTENTION_SLOTS;
+      printf("RAND %u\n", rand_slot);
       // make filler packet
       // wait for our random slot
       if(NETSTACK_RADIO.channel_clear()){
