@@ -18,6 +18,7 @@
 #include "net/packetbuf.h"
 #include "net/queuebuf.h"
 #include "net/netstack.h"
+#include "lib/random.h"
 #include <string.h>
 #include <stdlib.h>
 
@@ -41,20 +42,24 @@
  #define CONTENTION_SLOTS 4
  #endif
 
+#ifndef CCA_CONTENTION_SIZE
+ #define CCA_CONTENTION_SIZE 22
+ #endif
+
+#ifndef CONTENTION_SIZE
+ #define CONTENTION_SIZE 24
+ #endif
+
 #ifndef CONTENTION_TICKS
- #define CONTENTION_TICKS 5
+ #define CONTENTION_TICKS 50
  #endif
 
 #ifndef MAX_STROBE_SIZE
- #define MAX_STROBE_SIZE 1000
+ #define MAX_STROBE_SIZE 200
  #endif
 
-#ifndef CCA_TICKS
- #define CCA_TICKS 4
- #endif
-
-#ifndef CCA_TICKS
- #define CCA_TICKS 42
+#ifndef CONTENTION_PREPARE
+ #define CONTENTION_PREPARE 5
  #endif
 
 static volatile unsigned char radio_is_on = 0;
@@ -68,6 +73,7 @@ static void advanceSlot(struct rtimer *t, void *ptr, int status);
 static void schedule_outgoing_packet(unsigned char, mac_callback_t, void *, struct queuebuf *);
 static void real_send(mac_callback_t, void *, struct queuebuf *);
 static char check_buffers(unsigned char);
+static unsigned short map_rand(unsigned short);
 
 static struct rtimer taskSlot;
 
@@ -125,7 +131,7 @@ static void send_list(mac_callback_t sent, void *ptr, struct rdc_buf_list *buf_l
 static void packet_input(void){
   // printf("WPI-MAC-packet_input(), node ID: %u\n", node_id);
   if(NETSTACK_FRAMER.parse() < 0) {
-    printf("nullrdc: failed to parse %u\n", packetbuf_datalen());
+    printf("WPI-MAC: failed to parse %u\n", packetbuf_datalen());
   } else {
     NETSTACK_MAC.input();
   }
@@ -221,10 +227,21 @@ const struct rdc_driver wpimac_driver = {
   channel_check_interval,
 };
 /*---------------------------------------------------------------------------*/
+static unsigned short map_rand(unsigned short r){
+  unsigned short size_of_bracket = RANDOM_RAND_MAX / CONTENTION_SLOTS;
+  int i;
+  for (i = 0; i < CONTENTION_SLOTS; i++){
+    if(r <= (size_of_bracket * (i + 1))){
+      return i;
+    }
+  }
+}
+/*---------------------------------------------------------------------------*/
 static void real_send(mac_callback_t sent, void *ptr, struct queuebuf *pkt){
     int ret;
     uint8_t contention_strobe[MAX_STROBE_SIZE];
     unsigned char won_contention = 0;
+    queuebuf_to_packetbuf(pkt);
 
     int len = NETSTACK_FRAMER.create();
     if(len < 0) {
@@ -234,39 +251,49 @@ static void real_send(mac_callback_t sent, void *ptr, struct queuebuf *pkt){
       mac_call_sent_callback(sent, ptr, MAC_TX_ERR_FATAL, 1);
     } else {
       // randomly pick slot
-      srand(RTIMER_NOW() * node_id);
-      int rand_slot = (rand()/RAND_MAX) * CONTENTION_SLOTS;
-      printf("RAND %u\n", rand_slot);
+      random_init(RTIMER_NOW() * node_id);
+      unsigned short rand_slot = map_rand(random_rand());
       // make filler packet
+      memcpy(contention_strobe, packetbuf_hdrptr(), len);
+      // strobe needs to cover at least one CCA_CONTENTION slot
+      // plus any additional slots we need to cover
+      unsigned short j;
+      unsigned short fill_amount = (CCA_CONTENTION_SIZE - len) + (CONTENTION_SIZE * ((CONTENTION_SLOTS - 1) - rand_slot));
+      for(j = 0; j < fill_amount; j++){
+        contention_strobe[len] = 7;
+        len++;
+      }
+
+      rtimer_clock_t start_of_cont;
+
+      // wait for prep period to end
+      while(RTIMER_CLOCK_LT(RTIMER_NOW(), RTIMER_TIME(&taskSlot) + CONTENTION_PREPARE));
+      start_of_cont = RTIMER_NOW();
+
       // wait for our random slot
+      unsigned short cont_slot = 0;
+      while(!(cont_slot == rand_slot)){
+        while(RTIMER_CLOCK_LT(RTIMER_NOW(), start_of_cont + CONTENTION_TICKS));
+        start_of_cont = RTIMER_NOW();
+        cont_slot++;
+      }
+
+      // NOW its our turn
+
+      // first, test the air
       if(NETSTACK_RADIO.channel_clear()){
         // send filler, if no err, we won contention
-        won_contention = 1;
-      } else {
+        int c_ret = NETSTACK_RADIO.send(contention_strobe, len);
+        if(c_ret == RADIO_TX_OK){
+          won_contention = 1;
+        } else{
+          won_contention = 0;
+        }
+      } else { // another packet in the air, we lost contention
         won_contention = 0;
       }
 
       if(won_contention){
-        memcpy(contention_strobe, packetbuf_hdrptr(), len);
-        int j;
-        for(j = 0; j < 45; j++){
-          contention_strobe[len] = 7;
-          len++;
-        }
-
-        rtimer_clock_t t0 = RTIMER_NOW();
-        NETSTACK_RADIO.channel_clear();
-        rtimer_clock_t t1 = RTIMER_NOW();
-        NETSTACK_RADIO.send(contention_strobe, len);
-        rtimer_clock_t t2 = RTIMER_NOW();
-        printf("TIMES %u - %u - %u - %u\n", t0, t1, t2, len);
-
-
-        // if(NETSTACK_RADIO.clear_channel()){
-
-        // }
-
-        queuebuf_to_packetbuf(pkt);
         packetbuf_set_addr(PACKETBUF_ADDR_SENDER, &rimeaddr_node_addr);
         if(NETSTACK_FRAMER.create() < 0) {
           /* Failed to allocate space for headers */
