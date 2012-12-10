@@ -26,8 +26,10 @@
  #define TOTAL_SLOTS        12
  #endif
 
+// 252
+ // 1008
 #ifndef CRANKSHAFT_PERIOD
- #define CRANKSHAFT_PERIOD 252
+ #define CRANKSHAFT_PERIOD 180
  #endif
 
 #ifndef BROADCAST_SLOT
@@ -51,7 +53,7 @@
  #endif
 
 #ifndef CONTENTION_TICKS
- #define CONTENTION_TICKS 50
+ #define CONTENTION_TICKS 40
  #endif
 
 #ifndef MAX_STROBE_SIZE
@@ -62,20 +64,13 @@
  #define CONTENTION_PREPARE 5
  #endif
 
-static volatile unsigned char radio_is_on = 0;
-static volatile unsigned char current_slot = 0;
-static volatile unsigned char waiting_to_send = 0;
-static volatile unsigned char crankshaft_is_running = 0;
-static volatile unsigned char needed_slot = BROADCAST_SLOT;
-
 static unsigned int REGULAR_SLOT = (RTIMER_SECOND / 1000) * (CRANKSHAFT_PERIOD / TOTAL_SLOTS);
 static void advanceSlot(struct rtimer *t, void *ptr, int status);
+static void async_on(struct rtimer *t, void *ptr, int status);
 static void schedule_outgoing_packet(unsigned char, mac_callback_t, void *, struct queuebuf *);
 static void real_send(mac_callback_t, void *, struct queuebuf *);
 static char check_buffers(unsigned char);
 static unsigned short map_rand(unsigned short);
-
-static struct rtimer taskSlot;
 
 typedef struct QueuedPacket{
   mac_callback_t sent;
@@ -85,6 +80,10 @@ typedef struct QueuedPacket{
 } QueuedPacket;
 
 QueuedPacket *QPQueue[TOTAL_SLOTS];
+static struct rtimer taskSlot;
+rtimer_clock_t last;
+static volatile unsigned char radio_is_on = 0;
+static volatile unsigned char current_slot = 0;
 
 static void send_packet(mac_callback_t sent, void *ptr) {
   struct queuebuf *packet;
@@ -92,7 +91,7 @@ static void send_packet(mac_callback_t sent, void *ptr) {
   packet = queuebuf_new_from_packetbuf();
   if(packet == NULL) {
       /* No buffer available */
-      printf("xmac: send failed, no queue buffer available (of %u)\n", QUEUEBUF_CONF_NUM);
+      printf("WPI-MAC: send failed, no queue buffer available (of %u)\n", QUEUEBUF_CONF_NUM);
       mac_call_sent_callback(sent, ptr, MAC_TX_ERR, 1);
   } else {
     // schedule for proper slot
@@ -101,21 +100,13 @@ static void send_packet(mac_callback_t sent, void *ptr) {
 
     rimeaddr_t *dest = (rimeaddr_t*)packetbuf_addr(PACKETBUF_ADDR_RECEIVER);
     if(rimeaddr_cmp(packetbuf_addr(PACKETBUF_ADDR_RECEIVER), &rimeaddr_null)){
-      // printf("WPI-MAC-send_packet(), node ID: %u, GOT BROADCAST?\n", node_id);
       // schedule for slot 0
-      // void *newbuff = malloc(PACKETBUF_SIZE + PACKETBUF_HDR_SIZE);
-      // schedule_outgoing_packet(BROADCAST_SLOT, sent, ptr, newbuff, packetbuf_copyto(newbuff));
-      needed_slot = BROADCAST_SLOT;
+      // printf("scheduling bcast\n");
+      schedule_outgoing_packet(BROADCAST_SLOT, sent, ptr, packet);
     } else {
-      // unsigned char dest_node = dest->u8[7];
-      // printf("WPI-MAC-send_packet(), node ID: %u - GOT UNICAST? to %d\n", node_id, dest->u8[7]);
       // schedule for slot dest_node
-      // void *newbuff = malloc(PACKETBUF_SIZE + PACKETBUF_HDR_SIZE);
-      // schedule_outgoing_packet(dest_node, sent, ptr, newbuff, packetbuf_copyto(newbuff));
-      needed_slot = dest->u8[7];
+      schedule_outgoing_packet((unsigned short)dest->u8[7], sent, ptr, packet);
     }
-
-    schedule_outgoing_packet(needed_slot, sent, ptr, packet);
 
   }
 }
@@ -129,11 +120,12 @@ static void send_list(mac_callback_t sent, void *ptr, struct rdc_buf_list *buf_l
 }
 /*---------------------------------------------------------------------------*/
 static void packet_input(void){
-  // printf("WPI-MAC-packet_input(), node ID: %u\n", node_id);
+   // printf("WPI-MAC-packet_input(), node ID: %u\n", node_id);
   if(NETSTACK_FRAMER.parse() < 0) {
     printf("WPI-MAC: failed to parse %u\n", packetbuf_datalen());
   } else {
     NETSTACK_MAC.input();
+    // printf("%s\n", "PASSED UP\n");
   }
 }
 /*---------------------------------------------------------------------------*/
@@ -154,11 +146,13 @@ static int off(int keep_radio_on){
 }
 /*---------------------------------------------------------------------------*/
 static unsigned short channel_check_interval(void){
-  return 0;
+  return (1ul * CLOCK_SECOND * CRANKSHAFT_PERIOD) / RTIMER_ARCH_SECOND;
 }
 /*---------------------------------------------------------------------------*/
 static void advanceSlot(struct rtimer *t, void *ptr, int status){
-  if(!(rtimer_set(t, RTIMER_TIME(t) + REGULAR_SLOT, REGULAR_SLOT, (void (*)(struct rtimer *, void *))advanceSlot, NULL) == RTIMER_OK)){
+  off(TURN_OFF);
+  last = RTIMER_TIME(t);
+  if(!(rtimer_set(t, last + REGULAR_SLOT, 1, (void (*)(struct rtimer *, void *))advanceSlot, NULL) == RTIMER_OK)){
     printf("%s\n", "Could not schedule task!!!!!");
   }
   if(current_slot == TOTAL_SLOTS + 1){
@@ -170,35 +164,39 @@ static void advanceSlot(struct rtimer *t, void *ptr, int status){
     current_slot = BROADCAST_SLOT;
   }
   //printf("Slot is now %u\n", current_slot);
+
   unsigned char somethingToSend = check_buffers(current_slot);
-  if(current_slot == BROADCAST_SLOT || current_slot == node_id || somethingToSend){
-    // we need to be on
 
-    // see if we gotta send
-    if((current_slot != node_id) && somethingToSend){
+  if(somethingToSend){
     // grab the necessary info from our queue
-      QueuedPacket *curr = QPQueue[current_slot];
-      if(!radio_is_on) on();
-      real_send(curr->sent, curr->ptr, curr->packet);
-    } else { // else we just need to be awake to listen
-      // WAIT FOR CONTENTION
-      // while(RTIMER_CLOCK_LT(RTIMER_NOW(), RTIMER_TIME(t) + CONTENTION_TICKS));
-      if(!radio_is_on) on();
-    } 
-
-  } else{
+    QueuedPacket *curr = QPQueue[current_slot];
+    real_send(curr->sent, curr->ptr, curr->packet);
+  } else if(current_slot == BROADCAST_SLOT || current_slot == node_id){ // just need to be awake to listen
+    // if(!(rtimer_set(t, last + CONTENTION_PREPARE + (CONTENTION_TICKS * (CONTENTION_SLOTS)), 1, (void (*)(struct rtimer *, void *))async_on, NULL) == RTIMER_OK)){
+    //   printf("%s\n", "Could not schedule task!!!!!");
+    // }
+    rtimer_clock_t stall = last + CONTENTION_PREPARE + (CONTENTION_TICKS * (CONTENTION_SLOTS));
+    // printf("STALLLLL: %u %u %u %u\n", RTIMER_NOW(), stall, REGULAR_SLOT, last);
+    while(RTIMER_CLOCK_LT(RTIMER_NOW(), stall));
+    if(!radio_is_on) on();
+  } else {
     // we can snooze
     if(radio_is_on) off(TURN_OFF);
+
   }
 
 }
 /*---------------------------------------------------------------------------*/
+static void async_on(struct rtimer *t, void *ptr, int status){
+  if(!radio_is_on) on();
+  if(!(rtimer_set(t, last + REGULAR_SLOT, 1, (void (*)(struct rtimer *, void *))advanceSlot, NULL) == RTIMER_OK)){
+    printf("%s\n", "Could not schedule task!!!!!");
+  }
+}
+/*---------------------------------------------------------------------------*/
 static void init(void){
-  // on();
   current_slot = TOTAL_SLOTS + 1;
-  crankshaft_is_running = 1;
-  //must schedule recurring wakeups for broadcast and uni-recv
-  //also schedule slot advance
+
   int t;
   if(node_id < 10) { 
     t = REGULAR_SLOT + 300;
@@ -235,13 +233,13 @@ static unsigned short map_rand(unsigned short r){
       return i;
     }
   }
+  return CONTENTION_SLOTS - 1;
 }
 /*---------------------------------------------------------------------------*/
 static void real_send(mac_callback_t sent, void *ptr, struct queuebuf *pkt){
     int ret;
     uint8_t contention_strobe[MAX_STROBE_SIZE];
     unsigned char won_contention = 0;
-    queuebuf_to_packetbuf(pkt);
 
     int len = NETSTACK_FRAMER.create();
     if(len < 0) {
@@ -267,7 +265,7 @@ static void real_send(mac_callback_t sent, void *ptr, struct queuebuf *pkt){
       rtimer_clock_t start_of_cont;
 
       // wait for prep period to end
-      while(RTIMER_CLOCK_LT(RTIMER_NOW(), RTIMER_TIME(&taskSlot) + CONTENTION_PREPARE));
+      while(RTIMER_CLOCK_LT(RTIMER_NOW(), last + CONTENTION_PREPARE));
       start_of_cont = RTIMER_NOW();
 
       // wait for our random slot
@@ -279,7 +277,8 @@ static void real_send(mac_callback_t sent, void *ptr, struct queuebuf *pkt){
       }
 
       // NOW its our turn
-
+      if(!radio_is_on) on();
+      queuebuf_to_packetbuf(pkt);
       // first, test the air
       if(NETSTACK_RADIO.channel_clear()){
         // send filler, if no err, we won contention
@@ -297,7 +296,7 @@ static void real_send(mac_callback_t sent, void *ptr, struct queuebuf *pkt){
         packetbuf_set_addr(PACKETBUF_ADDR_SENDER, &rimeaddr_node_addr);
         if(NETSTACK_FRAMER.create() < 0) {
           /* Failed to allocate space for headers */
-          printf("wpimac: send failed, too large header\n");
+          printf("WPI-MAC: send failed, too large header\n");
           ret = MAC_TX_ERR_FATAL;
         } else {
           // printf("%s - %u - %u\n", "Waiting to send...", current_slot, needed_slot);
@@ -306,7 +305,7 @@ static void real_send(mac_callback_t sent, void *ptr, struct queuebuf *pkt){
           // rtimer_clock_t until = calcNext(current_slot, needed_slot);
           // while(RTIMER_CLOCK_LT(RTIMER_NOW(), recent + until));
           // printf("%s - %u - %u\n", "sending!", current_slot, needed_slot);
-          printf("%u\n", packetbuf_totlen());
+          // printf("%u\n", packetbuf_totlen());
           switch(NETSTACK_RADIO.send(packetbuf_hdrptr(), packetbuf_totlen())) {
           case RADIO_TX_OK:
             ret = MAC_TX_OK;
@@ -324,51 +323,51 @@ static void real_send(mac_callback_t sent, void *ptr, struct queuebuf *pkt){
 
         }
 
-        // off(TURN_OFF);
+        
         mac_call_sent_callback(sent, ptr, ret, 1);
 
-        // remove packet from our queue
-        if(ret == MAC_TX_OK){
-          QueuedPacket *head = QPQueue[current_slot];
-          QPQueue[current_slot] = head->next;
-          head->ptr = NULL;
-          queuebuf_free(head->packet);
-          head->packet = NULL;
-          head->next = NULL;
-          free(head);
-        }
       } else { // lost contention
         mac_call_sent_callback(sent, ptr, MAC_TX_COLLISION, 1);
       }
       
     }
+
+    QueuedPacket *head = QPQueue[current_slot];
+    QPQueue[current_slot] = head->next;
+    head->ptr = NULL;
+    queuebuf_free(head->packet);
+    head->packet = NULL;
+    head->next = NULL;
+    free(head);
 }
 /*---------------------------------------------------------------------------*/
 static void schedule_outgoing_packet(unsigned char slot, mac_callback_t sent, void *ptr, struct queuebuf *pkt){
-  if(QPQueue[slot] == NULL){
-    QPQueue[slot] = (QueuedPacket*) malloc(sizeof(QueuedPacket));
+   if(slot != node_id) {
     if(QPQueue[slot] == NULL){
-      printf("CRANKSHAFT RAN OUT OF MEMORY.\n");
-    } else{
-      QPQueue[slot]->sent = sent;
-      QPQueue[slot]->ptr = ptr;
-      QPQueue[slot]->packet = pkt;
-      QPQueue[slot]->next = NULL;
-    }
-  } else {
-    QueuedPacket *curr = QPQueue[slot];
-    while(curr->next != NULL){
+      QPQueue[slot] = (QueuedPacket*) malloc(sizeof(QueuedPacket));
+      if(QPQueue[slot] == NULL){
+        printf("WPI-MAC RAN OUT OF MEMORY.\n");
+      } else{
+        QPQueue[slot]->sent = sent;
+        QPQueue[slot]->ptr = ptr;
+        QPQueue[slot]->packet = pkt;
+        QPQueue[slot]->next = NULL;
+      }
+    } else {
+      QueuedPacket *curr = QPQueue[slot];
+      while(curr->next != NULL){
+        curr = curr->next;
+      }
+      curr->next = (QueuedPacket*) malloc(sizeof(QueuedPacket));
       curr = curr->next;
-    }
-    curr->next = (QueuedPacket*) malloc(sizeof(QueuedPacket));
-    curr = curr->next;
-    if(curr == NULL){
-      printf("CRANKSHAFT RAN OUT OF MEMORY.\n");
-    } else{
-      curr->sent = sent;
-      curr->ptr = ptr;
-      curr->packet = pkt;
-      curr->next = NULL;
+      if(curr == NULL){
+        printf("WPI-MAC RAN OUT OF MEMORY.\n");
+      } else{
+        curr->sent = sent;
+        curr->ptr = ptr;
+        curr->packet = pkt;
+        curr->next = NULL;
+      }
     }
   }
 }
