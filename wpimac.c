@@ -66,7 +66,6 @@
 
 static unsigned int REGULAR_SLOT = (RTIMER_SECOND / 1000) * (CRANKSHAFT_PERIOD / TOTAL_SLOTS);
 static void advanceSlot(struct rtimer *t, void *ptr, int status);
-static void async_on(struct rtimer *t, void *ptr, int status);
 static void schedule_outgoing_packet(unsigned char, mac_callback_t, void *, struct queuebuf *);
 static void real_send(mac_callback_t, void *, struct queuebuf *);
 static char check_buffers(unsigned char);
@@ -153,7 +152,7 @@ static void advanceSlot(struct rtimer *t, void *ptr, int status){
   off(TURN_OFF);
   last = RTIMER_TIME(t);
   if(!(rtimer_set(t, last + REGULAR_SLOT, 1, (void (*)(struct rtimer *, void *))advanceSlot, NULL) == RTIMER_OK)){
-    printf("%s\n", "Could not schedule task!!!!!");
+    printf("%s\n", "WPI-MAC: Could not schedule task!!!!!");
   }
   if(current_slot == TOTAL_SLOTS + 1){
     current_slot = BROADCAST_SLOT;
@@ -187,13 +186,6 @@ static void advanceSlot(struct rtimer *t, void *ptr, int status){
 
 }
 /*---------------------------------------------------------------------------*/
-static void async_on(struct rtimer *t, void *ptr, int status){
-  if(!radio_is_on) on();
-  if(!(rtimer_set(t, last + REGULAR_SLOT, 1, (void (*)(struct rtimer *, void *))advanceSlot, NULL) == RTIMER_OK)){
-    printf("%s\n", "Could not schedule task!!!!!");
-  }
-}
-/*---------------------------------------------------------------------------*/
 static void init(void){
   current_slot = TOTAL_SLOTS + 1;
 
@@ -204,7 +196,7 @@ static void init(void){
     t = REGULAR_SLOT + 240;
   }
   if(!(rtimer_set(&taskSlot, RTIMER_NOW() + t, 1, (void (*)(struct rtimer *, void *))advanceSlot, NULL) == RTIMER_OK)){
-    printf("%s\n", "Could not schedule initial task!!!!!");
+    printf("%s\n", "WPI-MAC: Could not schedule initial task!!!!!");
   }
 
   int i = 0;
@@ -346,7 +338,7 @@ static void schedule_outgoing_packet(unsigned char slot, mac_callback_t sent, vo
     if(QPQueue[slot] == NULL){
       QPQueue[slot] = (QueuedPacket*) malloc(sizeof(QueuedPacket));
       if(QPQueue[slot] == NULL){
-        printf("WPI-MAC RAN OUT OF MEMORY.\n");
+        printf("WPI-MAC: RAN OUT OF MEMORY.\n");
       } else{
         QPQueue[slot]->sent = sent;
         QPQueue[slot]->ptr = ptr;
@@ -361,7 +353,7 @@ static void schedule_outgoing_packet(unsigned char slot, mac_callback_t sent, vo
       curr->next = (QueuedPacket*) malloc(sizeof(QueuedPacket));
       curr = curr->next;
       if(curr == NULL){
-        printf("WPI-MAC RAN OUT OF MEMORY.\n");
+        printf("WPI-MAC: RAN OUT OF MEMORY.\n");
       } else{
         curr->sent = sent;
         curr->ptr = ptr;
